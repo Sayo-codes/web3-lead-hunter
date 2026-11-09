@@ -4,8 +4,8 @@ import { validateCommunityLink } from '@/lib/community/validate';
 import { getServerConfig } from '@/lib/config';
 import { one, q } from '@/lib/db';
 import {
-  acquireLock, createJob, createNotification, finishJob, getApiSources, getJob, getSettings, lastJobCreatedAt,
-  markJobRunning, nextQueuedJob, recoverStaleJobs, releaseLock, updateSourceHealth,
+  acquireLock, claimQueuedJob, createJob, createNotification, finishJob, getApiSources, getJob, getSettings, lastJobCreatedAt,
+  markJobRunning, nextQueuedJob, recordWorkerHeartbeat, recoverStaleJobs, releaseLock, renewLock, updateJobHeartbeat, updateSourceHealth,
 } from '@/lib/db/repository';
 import { getProviders, mergeToken, type ProviderContext, type TokenRef } from '@/lib/providers';
 import { DexScreenerProvider } from '@/lib/providers/dexscreener';
@@ -236,7 +236,7 @@ export async function upsertCandidate(c: DiscoveredToken, settings: UserSettings
   return { projectId, created, pairsUpserted, linksFound, linksValidated };
 }
 
-export async function runDiscoveryJob(jobId: string): Promise<void> {
+export async function runDiscoveryJob(jobId: string, owner = 'worker'): Promise<void> {
   const job = await getJob(jobId);
   if (!job) return;
   const started = Date.now();
@@ -244,7 +244,20 @@ export async function runDiscoveryJob(jobId: string): Promise<void> {
   const errors: ProviderError[] = [];
   const providerStats: Record<string, unknown> = {};
   let projectsCreated = 0, projectsUpdated = 0, pairsUpserted = 0, linksFound = 0, linksValidated = 0;
-  await markJobRunning(jobId);
+  await markJobRunning(jobId, owner);
+  await recordWorkerHeartbeat(owner, { status: 'processing', current_job_id: jobId });
+
+  // Periodically renew the distributed lock and update job heartbeat while processing
+  const renewalTimer = setInterval(async () => {
+    try {
+      await renewLock('discovery', 60, owner);
+      await updateJobHeartbeat(jobId, owner);
+      await recordWorkerHeartbeat(owner, { status: 'processing', current_job_id: jobId });
+    } catch {
+      // non-fatal periodic renewal
+    }
+  }, 15000);
+
   try {
     const settings = await getSettings();
     const sources = await getApiSources();
@@ -323,10 +336,14 @@ export async function runDiscoveryJob(jobId: string): Promise<void> {
     }
     const status = errors.length ? 'completed_with_errors' : 'completed';
     await finishJob(jobId, { status, duration_ms: Date.now() - started, projects_created: projectsCreated, projects_updated: projectsUpdated, pairs_upserted: pairsUpserted, links_found: linksFound, links_validated: linksValidated, provider_stats: { ...providerStats, errors }, logs, error: errors.length ? errors.slice(0, 5).map((e) => `${e.provider}: ${e.message}`).join('; ') : null });
+    await recordWorkerHeartbeat(owner, { status: 'idle', current_job_id: null, consecutive_failures: 0 });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown pipeline error';
     log(logs, 'error', message);
     await finishJob(jobId, { status: 'failed', duration_ms: Date.now() - started, error: message, logs, provider_stats: providerStats, projects_created: projectsCreated, projects_updated: projectsUpdated, pairs_upserted: pairsUpserted, links_found: linksFound, links_validated: linksValidated });
+    await recordWorkerHeartbeat(owner, { status: 'idle', current_job_id: null, last_error: message });
+  } finally {
+    clearInterval(renewalTimer);
   }
 }
 
@@ -335,23 +352,26 @@ export async function recomputeProjectQualification(projectId: string) {
   await recomputeQualification(projectId, settings, false);
 }
 
-export async function processWorkerTick(owner: string): Promise<{ ran: boolean; jobId?: string }> {
-  await recoverStaleJobs();
-  const locked = await acquireLock('discovery', 1800, owner);
-  if (!locked) return { ran: false };
+export async function processWorkerTick(owner: string): Promise<{ ran: boolean; jobId?: string; reason?: string }> {
+  await recoverStaleJobs(120);
+  const locked = await acquireLock('discovery', 60, owner);
+  if (!locked) return { ran: false, reason: 'lock_held' };
   try {
-    let job = await nextQueuedJob();
+    let job = await claimQueuedJob(owner);
     if (!job) {
       const settings = await getSettings();
       const last = await lastJobCreatedAt();
       const due = !last || Date.now() - new Date(last).getTime() >= settings.discovery_interval_minutes * 60000;
-      if (due) job = await createJob('scheduled');
+      if (due) {
+        await createJob('scheduled');
+        job = await claimQueuedJob(owner);
+      }
     }
-    if (!job) return { ran: false };
-    console.log(`[worker] starting discovery job ${job.id} (${job.trigger_source})`);
-    await runDiscoveryJob(job.id);
+    if (!job) return { ran: false, reason: 'no_job_due' };
+    console.log(`[worker] starting discovery job ${job.id} (${job.trigger_source}) by ${owner}`);
+    await runDiscoveryJob(job.id, owner);
     return { ran: true, jobId: job.id };
   } finally {
-    await releaseLock('discovery');
+    await releaseLock('discovery', owner);
   }
 }

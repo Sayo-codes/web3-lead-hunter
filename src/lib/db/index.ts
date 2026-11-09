@@ -9,8 +9,8 @@ export interface Db {
   close(): Promise<void>;
 }
 
-const CORE_MIGRATIONS = ['202611080001_core.sql', '202611080002_seed.sql'];
-const ALL_MIGRATIONS = [...CORE_MIGRATIONS, '202611080003_rls.sql'];
+const CORE_MIGRATIONS = ['202611080001_core.sql', '202611080002_seed.sql', '202611090001_worker_reliability.sql'];
+const ALL_MIGRATIONS = ['202611080001_core.sql', '202611080002_seed.sql', '202611090001_worker_reliability.sql', '202611080003_rls.sql'];
 
 async function readMigration(file: string) {
   return fs.readFile(path.join(process.cwd(), 'supabase', 'migrations', file), 'utf8');

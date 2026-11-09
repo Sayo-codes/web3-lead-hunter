@@ -240,6 +240,46 @@ export interface DiscoveryJob {
   provider_stats: Record<string, unknown>;
   error: string | null;
   logs: Array<{ at: string; level: string; message: string }>;
+  locked_by?: string | null;
+  heartbeat_at?: string | null;
+  retry_count?: number;
+  max_retries?: number;
+}
+
+export interface WorkerHeartbeat {
+  worker_id: string;
+  worker_mode: 'in_process' | 'standalone';
+  status: 'idle' | 'processing' | 'stopping' | 'stopped';
+  current_job_id: string | null;
+  last_heartbeat_at: string;
+  started_at: string;
+  consecutive_failures: number;
+  last_error: string | null;
+  metadata: Record<string, unknown>;
+  updated_at: string;
+}
+
+export type OverallWorkerStatus = 'running' | 'idle' | 'processing' | 'unavailable' | 'error';
+
+export interface WorkerHealth {
+  status: OverallWorkerStatus;
+  active_workers: number;
+  workers: Array<{
+    worker_id: string;
+    worker_mode: 'in_process' | 'standalone';
+    status: 'idle' | 'processing' | 'stopping' | 'stopped';
+    last_heartbeat_at: string;
+    current_job_id: string | null;
+  }>;
+  last_heartbeat: string | null;
+  last_successful_discovery: string | null;
+  last_failed_discovery: string | null;
+  currently_running_job: DiscoveryJob | null;
+  queued_jobs_count: number;
+  failed_jobs_count_24h: number;
+  consecutive_failures: number;
+  last_error: string | null;
+  last_discovery_duration_ms: number | null;
 }
 
 export interface Notification {

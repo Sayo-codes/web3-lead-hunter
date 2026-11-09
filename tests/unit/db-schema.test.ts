@@ -10,6 +10,7 @@ describe('database schema', () => {
     const dir = path.join(process.cwd(), 'supabase/migrations');
     await db.exec(await fs.readFile(path.join(dir, '202611080001_core.sql'), 'utf8'));
     await db.exec(await fs.readFile(path.join(dir, '202611080002_seed.sql'), 'utf8'));
+    await db.exec(await fs.readFile(path.join(dir, '202611090001_worker_reliability.sql'), 'utf8'));
     const insertToken = `INSERT INTO tokens (chain, contract_address, contract_address_key, name, symbol) VALUES ('ethereum','0xAbC','0xabc','Test','TST') ON CONFLICT (chain, contract_address_key) DO UPDATE SET name=EXCLUDED.name RETURNING id`;
     const t1 = await db.query<{ id: string }>(insertToken);
     const t2 = await db.query<{ id: string }>(insertToken);
@@ -22,6 +23,16 @@ describe('database schema', () => {
     expect(settings.rows).toHaveLength(1);
     const templates = await db.query<{ id: string }>(`SELECT id FROM message_templates`);
     expect(templates.rows.length).toBeGreaterThanOrEqual(3);
+
+    // Verify worker reliability additions
+    const heartbeats = await db.query<{ count: number }>(`SELECT COUNT(*)::int AS count FROM worker_heartbeats`);
+    expect(heartbeats.rows[0].count).toBe(0);
+    const jobCols = await db.query<{ id: string; locked_by: string; retry_count: number; max_retries: number }>(
+      `INSERT INTO discovery_jobs (status, trigger_source, locked_by, retry_count, max_retries) VALUES ('queued', 'manual', 'test-worker', 0, 3) RETURNING id, locked_by, retry_count, max_retries`,
+    );
+    expect(jobCols.rows[0].locked_by).toBe('test-worker');
+    expect(jobCols.rows[0].retry_count).toBe(0);
+    expect(jobCols.rows[0].max_retries).toBe(3);
     await db.close();
   });
 });

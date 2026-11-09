@@ -1,7 +1,7 @@
 import { one, q } from '@/lib/db';
 import type {
   ApiSource, CommunityLink, DashboardStats, DiscoveryJob, MessageTemplate, Notification, OutreachHistory,
-  Project, ProjectFilters, Prospect, SocialLink, TradingPair, UserSettings,
+  OverallWorkerStatus, Project, ProjectFilters, Prospect, SocialLink, TradingPair, UserSettings, WorkerHealth, WorkerHeartbeat,
 } from '@/lib/types';
 import { toNumber } from '@/lib/utils';
 
@@ -381,43 +381,339 @@ export async function updateTemplate(id: string, input: Partial<MessageTemplate>
 }
 export async function deleteTemplate(id: string) { await q('DELETE FROM message_templates WHERE id=$1', [id]); }
 
-export async function createJob(trigger: DiscoveryJob['trigger_source']): Promise<DiscoveryJob> {
-  const row = await one<DiscoveryJob>(`INSERT INTO discovery_jobs (status, trigger_source) VALUES ('queued', $1) RETURNING *`, [trigger]);
-  return row!;
+export function mapJob(r: any): DiscoveryJob {
+  return {
+    id: r.id,
+    status: r.status,
+    trigger_source: r.trigger_source,
+    created_at: r.created_at,
+    started_at: r.started_at ?? null,
+    finished_at: r.finished_at ?? null,
+    duration_ms: n(r.duration_ms),
+    projects_created: Number(r.projects_created ?? 0),
+    projects_updated: Number(r.projects_updated ?? 0),
+    pairs_upserted: Number(r.pairs_upserted ?? 0),
+    links_found: Number(r.links_found ?? 0),
+    links_validated: Number(r.links_validated ?? 0),
+    provider_stats: json(r.provider_stats, {}),
+    error: r.error ?? null,
+    logs: json(r.logs, []),
+    locked_by: r.locked_by ?? null,
+    heartbeat_at: r.heartbeat_at ?? null,
+    retry_count: Number(r.retry_count ?? 0),
+    max_retries: Number(r.max_retries ?? 3),
+  };
 }
-export async function getJob(id: string): Promise<DiscoveryJob | null> { return one<DiscoveryJob>('SELECT * FROM discovery_jobs WHERE id=$1', [id]); }
+
+export async function createJob(trigger: DiscoveryJob['trigger_source']): Promise<DiscoveryJob> {
+  const row = await one<any>(`INSERT INTO discovery_jobs (status, trigger_source) VALUES ('queued', $1) RETURNING *`, [trigger]);
+  return mapJob(row);
+}
+
+export async function getJob(id: string): Promise<DiscoveryJob | null> {
+  const row = await one<any>('SELECT * FROM discovery_jobs WHERE id=$1', [id]);
+  return row ? mapJob(row) : null;
+}
+
 export async function listJobs(limit = 50): Promise<DiscoveryJob[]> {
   const rows = await q('SELECT * FROM discovery_jobs ORDER BY created_at DESC LIMIT $1', [limit]);
-  return rows.map((r: any) => ({ ...r, provider_stats: json(r.provider_stats, {}), logs: json(r.logs, []) }));
+  return rows.map(mapJob);
 }
-export async function nextQueuedJob(): Promise<DiscoveryJob | null> { return one<DiscoveryJob>(`SELECT * FROM discovery_jobs WHERE status='queued' ORDER BY created_at ASC LIMIT 1`); }
-export async function markJobRunning(id: string) { await q(`UPDATE discovery_jobs SET status='running', started_at=now() WHERE id=$1`, [id]); }
+
+export async function nextQueuedJob(): Promise<DiscoveryJob | null> {
+  const row = await one<any>(`SELECT * FROM discovery_jobs WHERE status='queued' ORDER BY created_at ASC LIMIT 1`);
+  return row ? mapJob(row) : null;
+}
+
+export async function claimQueuedJob(owner: string): Promise<DiscoveryJob | null> {
+  const row = await one<any>(
+    `UPDATE discovery_jobs
+     SET status = 'running', started_at = now(), locked_by = $1, heartbeat_at = now()
+     WHERE id = (
+       SELECT id FROM discovery_jobs
+       WHERE status = 'queued'
+       ORDER BY created_at ASC
+       LIMIT 1
+     )
+     RETURNING *`,
+    [owner],
+  );
+  return row ? mapJob(row) : null;
+}
+
+export async function markJobRunning(id: string, owner?: string) {
+  await q(
+    `UPDATE discovery_jobs
+     SET status = 'running',
+         started_at = COALESCE(started_at, now()),
+         locked_by = COALESCE($2, locked_by),
+         heartbeat_at = now()
+     WHERE id = $1`,
+    [id, owner ?? null],
+  );
+}
+
+export async function updateJobHeartbeat(jobId: string, owner: string): Promise<boolean> {
+  const rows = await q(
+    `UPDATE discovery_jobs
+     SET heartbeat_at = now()
+     WHERE id = $1 AND (locked_by = $2 OR locked_by IS NULL) AND status = 'running'
+     RETURNING id`,
+    [jobId, owner],
+  );
+  return rows.length > 0;
+}
+
 export async function finishJob(id: string, patch: Partial<DiscoveryJob> & { status: DiscoveryJob['status'] }) {
   const current = await getJob(id);
   if (!current) return;
   const s = { ...current, ...patch };
   await q(
-    `UPDATE discovery_jobs SET status=$2, finished_at=now(), duration_ms=$3, projects_created=$4, projects_updated=$5, pairs_upserted=$6,
-      links_found=$7, links_validated=$8, provider_stats=$9, error=$10, logs=$11 WHERE id=$1`,
-    [id, s.status, s.duration_ms ?? null, s.projects_created, s.projects_updated, s.pairs_upserted, s.links_found, s.links_validated, JSON.stringify(s.provider_stats ?? {}), s.error ?? null, JSON.stringify(s.logs ?? [])],
+    `UPDATE discovery_jobs SET
+       status = $2,
+       finished_at = now(),
+       duration_ms = $3,
+       projects_created = $4,
+       projects_updated = $5,
+       pairs_upserted = $6,
+       links_found = $7,
+       links_validated = $8,
+       provider_stats = $9,
+       error = $10,
+       logs = $11,
+       heartbeat_at = now(),
+       locked_by = NULL
+     WHERE id = $1`,
+    [
+      id,
+      s.status,
+      s.duration_ms ?? null,
+      s.projects_created,
+      s.projects_updated,
+      s.pairs_upserted,
+      s.links_found,
+      s.links_validated,
+      JSON.stringify(s.provider_stats ?? {}),
+      s.error ?? null,
+      JSON.stringify(s.logs ?? []),
+    ],
   );
 }
-export async function recoverStaleJobs() {
-  await q(`UPDATE discovery_jobs SET status='failed', finished_at=now(), error='Recovered stale running job on worker startup' WHERE status='running' AND started_at < now() - interval '30 minutes'`);
+
+export async function recoverStaleJobs(heartbeatTimeoutSeconds = 120): Promise<{ recoveredCount: number; failedCount: number }> {
+  const staleRunning = await q<any>(
+    `SELECT * FROM discovery_jobs
+     WHERE status = 'running'
+       AND (
+         (heartbeat_at IS NOT NULL AND heartbeat_at < now() - ($1 * interval '1 second'))
+         OR (heartbeat_at IS NULL AND started_at < now() - ($1 * interval '1 second'))
+       )`,
+    [heartbeatTimeoutSeconds],
+  );
+
+  let recoveredCount = 0;
+  let failedCount = 0;
+
+  for (const job of staleRunning) {
+    const currentRetries = Number(job.retry_count ?? 0);
+    const maxRetries = Number(job.max_retries ?? 3);
+    const logs = json<Array<{ at: string; level: string; message: string }>>(job.logs, []);
+
+    if (currentRetries < maxRetries) {
+      logs.push({
+        at: new Date().toISOString(),
+        level: 'warn',
+        message: `Recovered stale job: worker heartbeat timeout (${heartbeatTimeoutSeconds}s). Re-queuing (retry ${currentRetries + 1}/${maxRetries}).`,
+      });
+      await q(
+        `UPDATE discovery_jobs
+         SET status = 'queued',
+             retry_count = retry_count + 1,
+             locked_by = NULL,
+             heartbeat_at = NULL,
+             logs = $2
+         WHERE id = $1`,
+        [job.id, JSON.stringify(logs)],
+      );
+      recoveredCount++;
+    } else {
+      logs.push({
+        at: new Date().toISOString(),
+        level: 'error',
+        message: `Job failed: exceeded maximum retries (${maxRetries}) after worker crash or heartbeat timeout.`,
+      });
+      await q(
+        `UPDATE discovery_jobs
+         SET status = 'failed',
+             finished_at = now(),
+             locked_by = NULL,
+             error = 'Exceeded maximum retries after worker heartbeat timeout',
+             logs = $2
+         WHERE id = $1`,
+        [job.id, JSON.stringify(logs)],
+      );
+      failedCount++;
+    }
+  }
+
+  // Also clear expired worker locks
+  await q(`UPDATE worker_locks SET locked_until = now(), updated_at = now() WHERE locked_until < now()`);
+
+  return { recoveredCount, failedCount };
 }
+
 export async function lastJobCreatedAt(): Promise<string | null> {
   const r = await one<{ created_at: string }>(`SELECT created_at FROM discovery_jobs ORDER BY created_at DESC LIMIT 1`);
   return r?.created_at ?? null;
 }
+
 export async function acquireLock(id: string, seconds: number, owner: string): Promise<boolean> {
   const rows = await q(
     `INSERT INTO worker_locks (id, locked_until, locked_by, updated_at)
      VALUES ($1, now() + ($2 * interval '1 second'), $3, now())
-     ON CONFLICT (id) DO UPDATE SET locked_until=EXCLUDED.locked_until, locked_by=EXCLUDED.locked_by, updated_at=now()
-     WHERE worker_locks.locked_until < now()
+     ON CONFLICT (id) DO UPDATE SET
+       locked_until = EXCLUDED.locked_until,
+       locked_by = EXCLUDED.locked_by,
+       updated_at = now()
+     WHERE worker_locks.locked_until < now() OR worker_locks.locked_by = EXCLUDED.locked_by
      RETURNING id`,
     [id, seconds, owner],
   );
   return rows.length > 0;
 }
-export async function releaseLock(id: string) { await q(`UPDATE worker_locks SET locked_until=now(), updated_at=now() WHERE id=$1`, [id]); }
+
+export async function renewLock(id: string, seconds: number, owner: string): Promise<boolean> {
+  const rows = await q(
+    `UPDATE worker_locks
+     SET locked_until = now() + ($2 * interval '1 second'), updated_at = now()
+     WHERE id = $1 AND locked_by = $3
+     RETURNING id`,
+    [id, seconds, owner],
+  );
+  return rows.length > 0;
+}
+
+export async function releaseLock(id: string, owner?: string): Promise<boolean> {
+  const rows = await q(
+    `UPDATE worker_locks
+     SET locked_until = now(), updated_at = now()
+     WHERE id = $1 AND ($2::text IS NULL OR locked_by = $2 OR locked_until < now())
+     RETURNING id`,
+    [id, owner ?? null],
+  );
+  return rows.length > 0;
+}
+
+export async function recordWorkerHeartbeat(workerId: string, data: {
+  worker_mode?: 'in_process' | 'standalone';
+  status?: 'idle' | 'processing' | 'stopping' | 'stopped';
+  current_job_id?: string | null;
+  consecutive_failures?: number;
+  last_error?: string | null;
+  metadata?: Record<string, unknown>;
+}): Promise<void> {
+  await q(
+    `INSERT INTO worker_heartbeats (worker_id, worker_mode, status, current_job_id, last_heartbeat_at, consecutive_failures, last_error, metadata, updated_at)
+     VALUES ($1, COALESCE($2, 'standalone'), COALESCE($3, 'idle'), $4, now(), COALESCE($5, 0), $6, $7, now())
+     ON CONFLICT (worker_id) DO UPDATE SET
+       worker_mode = COALESCE(EXCLUDED.worker_mode, worker_heartbeats.worker_mode),
+       status = COALESCE(EXCLUDED.status, worker_heartbeats.status),
+       current_job_id = EXCLUDED.current_job_id,
+       last_heartbeat_at = now(),
+       consecutive_failures = COALESCE(EXCLUDED.consecutive_failures, worker_heartbeats.consecutive_failures),
+       last_error = EXCLUDED.last_error,
+       metadata = COALESCE(EXCLUDED.metadata, worker_heartbeats.metadata),
+       updated_at = now()`,
+    [
+      workerId,
+      data.worker_mode ?? null,
+      data.status ?? null,
+      data.current_job_id ?? null,
+      data.consecutive_failures ?? null,
+      data.last_error ?? null,
+      JSON.stringify(data.metadata ?? {}),
+    ],
+  );
+}
+
+export async function clearWorkerHeartbeat(workerId: string): Promise<void> {
+  await q(`UPDATE worker_heartbeats SET status = 'stopped', last_heartbeat_at = now(), current_job_id = NULL, updated_at = now() WHERE worker_id = $1`, [workerId]);
+}
+
+export async function getWorkerHealth(): Promise<WorkerHealth> {
+  // Prune workers that have not reported heartbeat in > 3 minutes to 'stopped'
+  await q(`UPDATE worker_heartbeats SET status = 'stopped', updated_at = now() WHERE status != 'stopped' AND last_heartbeat_at < now() - interval '3 minutes'`);
+
+  // Active workers (heartbeat within 60s)
+  const activeRows = await q<any>(
+    `SELECT * FROM worker_heartbeats
+     WHERE status IN ('idle', 'processing') AND last_heartbeat_at >= now() - interval '60 seconds'
+     ORDER BY last_heartbeat_at DESC`,
+  );
+
+  const runningJobRow = await one<any>(
+    `SELECT * FROM discovery_jobs WHERE status = 'running' ORDER BY started_at DESC LIMIT 1`,
+  );
+  const runningJob = runningJobRow ? mapJob(runningJobRow) : null;
+
+  const queuedCountRow = await one<{ count: string }>(
+    `SELECT COUNT(*)::text AS count FROM discovery_jobs WHERE status = 'queued'`,
+  );
+  const queuedCount = Number(queuedCountRow?.count ?? 0);
+
+  const lastSuccess = await one<{ finished_at: string; duration_ms: number }>(
+    `SELECT finished_at, duration_ms FROM discovery_jobs WHERE status = 'completed' ORDER BY finished_at DESC LIMIT 1`,
+  );
+
+  const lastFailed = await one<{ finished_at: string; error: string }>(
+    `SELECT finished_at, error FROM discovery_jobs WHERE status = 'failed' ORDER BY finished_at DESC LIMIT 1`,
+  );
+
+  const failed24hRow = await one<{ count: string }>(
+    `SELECT COUNT(*)::text AS count FROM discovery_jobs WHERE status = 'failed' AND created_at >= now() - interval '24 hours'`,
+  );
+
+  const recentJobs = await q<{ status: string; error: string | null }>(
+    `SELECT status, error FROM discovery_jobs WHERE status IN ('completed', 'failed', 'completed_with_errors') ORDER BY COALESCE(finished_at, created_at) DESC LIMIT 10`,
+  );
+  let consecutiveFailures = 0;
+  for (const j of recentJobs) {
+    if (j.status === 'failed') consecutiveFailures++;
+    else break;
+  }
+
+  const latestHeartbeat = activeRows[0]?.last_heartbeat_at ?? null;
+  const isProcessing = runningJob !== null || activeRows.some((w: any) => w.status === 'processing');
+
+  let status: OverallWorkerStatus = 'idle';
+  if (consecutiveFailures >= 3) {
+    status = 'error';
+  } else if (isProcessing) {
+    status = 'processing';
+  } else if (activeRows.length > 0) {
+    status = 'idle';
+  } else {
+    status = 'unavailable';
+  }
+
+  return {
+    status,
+    active_workers: activeRows.length,
+    workers: activeRows.map((r: any) => ({
+      worker_id: r.worker_id,
+      worker_mode: r.worker_mode,
+      status: r.status,
+      last_heartbeat_at: r.last_heartbeat_at,
+      current_job_id: r.current_job_id,
+    })),
+    last_heartbeat: latestHeartbeat,
+    last_successful_discovery: lastSuccess?.finished_at ?? null,
+    last_failed_discovery: lastFailed?.finished_at ?? null,
+    currently_running_job: runningJob,
+    queued_jobs_count: queuedCount,
+    failed_jobs_count_24h: Number(failed24hRow?.count ?? 0),
+    consecutive_failures: consecutiveFailures,
+    last_error: lastFailed?.error ?? null,
+    last_discovery_duration_ms: lastSuccess?.duration_ms ? Number(lastSuccess.duration_ms) : null,
+  };
+}
