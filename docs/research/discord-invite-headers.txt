@@ -1,0 +1,20 @@
+HTTP/2 200 
+date: Sun, 08 Nov 2026 17:08:01 GMT
+content-type: application/json
+server: cloudflare
+cache-control: public, max-age=300
+strict-transport-security: max-age=31536000; includeSubDomains; preload
+x-discord-features: invites
+vary: Accept-Encoding
+via: 1.1 google
+alt-svc: h3=":443"; ma=86400
+last-modified: Sun, 08 Nov 2026 17:08:01 GMT
+cf-cache-status: EXPIRED
+set-cookie: _cfuvid=tuod2bhflSNu_EZL6QtbQCTdne2n19FWT7q.OvlwTlY-1794157681.6431766-1.0.1.1-yWf.Y9S5FhLlr6I4fOPfig6GGAdBXYYAhMIgtqu.ayU; HttpOnly; SameSite=None; Secure; Path=/; Domain=discord.com
+x-content-type-options: nosniff
+report-to: {"group":"cf-nel","max_age":604800,"endpoints":[{"url":"https://a.nel.cloudflare.com/report/v4?s=fT5k3TrROjR4ZVCaHylUZFkenygEEO%2FB8FkSsSgWySgbSJGiEqlJYPeIbrr9wqyloJplkC5aDPH0j9ZdXEsMjljFuzfY5UkMFEyJJa1sJuJYqgUj5hfbEwNLFUEJ"}]}
+nel: {"report_to":"cf-nel","success_fraction":0.0,"max_age":604800}
+reporting-endpoints: csp-sentry="https://o64374.ingest.sentry.io/api/5441894/security/?sentry_key=8fbbce30bf5244ec9429546beef21870&sentry_environment=stable"
+content-security-policy: frame-ancestors 'none'; default-src https://o64374.ingest.sentry.io; report-to csp-sentry; report-uri https://o64374.ingest.sentry.io/api/5441894/security/?sentry_key=8fbbce30bf5244ec9429546beef21870&sentry_environment=stable
+cf-ray: a5762d664c62388f-SEA
+

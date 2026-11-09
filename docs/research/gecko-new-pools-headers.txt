@@ -1,0 +1,25 @@
+HTTP/2 200 
+date: Sun, 08 Nov 2026 16:49:02 GMT
+content-type: application/json; charset=utf-8
+content-length: 37312
+x-frame-options: SAMEORIGIN
+x-xss-protection: 1; mode=block
+x-content-type-options: nosniff
+x-download-options: noopen
+x-permitted-cross-domain-policies: none
+referrer-policy: strict-origin-when-cross-origin
+cache-control: max-age=30, public, must-revalidate, s-maxage=60
+vary: Accept, Origin, accept-encoding
+etag: W/"8603d37251a399025d16a6b2ff375801"
+x-gt-env: qa-3tm
+x-request-id: 194b93af-b8f5-4f0d-ad00-16d5a6d9c41b
+x-runtime: 0.400296
+x-content-digest: 89dfa0010d1f4847e49d1adb119c258ce25c87ff
+x-rack-cache: stale, invalid, ignore, store
+accept-ranges: bytes
+cf-cache-status: HIT
+speculation-rules: "/cdn-cgi/speculation"
+server: cloudflare
+cf-ray: a5761193ade3fb73-SEA
+alt-svc: h3=":443"; ma=86400
+
